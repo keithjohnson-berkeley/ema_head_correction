@@ -64,7 +64,7 @@ def read_ndi_data(mydir, file_name,sensors,subcolumns):
         df.loc[df.loc[:,state]!="OK",cols]=[np.nan,np.nan,np.nan]   
     return df
 
-def get_rotation(df):
+def get_referenced_rotation(df):
     '''
     given a dataframe representation of a biteplate recording, find rotation matrix 
          to put the data on the occlusal plane coordinate system
@@ -98,8 +98,54 @@ def get_rotation(df):
     m = np.array([x, y, z])    # rotion matrix directly
 
     return OS, m
- 
-def read_biteplate(my_dir,file_name,sensors,subcolumns):
+
+def get_desired_head_location(df):  
+    ''' get the desired positions of three points - nasion, right mastoid, left mastoid (REF, RMA, LMA)
+        so that the translation and rotation of these points will correct for head movement, and put
+        the data onto an occlusal plane coordinate system.  
+        
+        The location of the occlusal plane is given by a bite-plate, and the triangle formed by REF (nasion), 
+        OS (origin sensor), and MS (molar sensor), which are in the saggital plane.
+        
+        Input - a dataframe that has points 
+            REF, RMA, LMA, OS, and MS
+            
+        Output - 
+            desired positions of REF, RMA, and LMA
+    '''
+    # The relative locations of these is fixed - okay to operate on means
+    MS = df.loc[:, ['MS_x', 'MS_y', 'MS_z']].mean(skipna=True).as_matrix()
+    OS = df.loc[:, ['OS_x', 'OS_y', 'OS_z']].mean(skipna=True).as_matrix()
+    REF = df.loc[:,['REF_x', 'REF_y', 'REF_z']].mean(skipna=True).as_matrix()
+    RMA= df.loc[:, ['RMA_x', 'RMA_y', 'RMA_z']].mean(skipna=True).as_matrix()
+    LMA = df.loc[:, ['LMA_x', 'LMA_y', 'LMA_z']].mean(skipna=True).as_matrix()
+    
+    # 1) start by translating the space so OS is at the origin
+    ref_t = REF-OS   
+    ms_t = MS-OS
+    rma_t = RMA-OS
+    lma_t = LMA-OS
+    os_t = np.array([0,0,0])
+    
+    # 2) now find the rotation matrix to the occlusal coordinate system
+    z = cross(ms_t,ref_t)  # z is perpendicular to ms and ref vectors
+    z = z/norm(z)
+    
+    y = cross(z,ms_t)        # y is perpendicular to z and ms
+    y = y/norm(y)
+    
+    x = cross(z,y)
+    x = x/norm(x)
+       
+    m = np.array([x, y, z])    # rotion matrix directly
+    
+    # 3) now rotate the mastoid points - using the rotation matrix
+    rma_t = dot(rma_t,m.T) 
+    lma_t = dot(lma_t,m.T)
+    
+    return ref_t, rma_t, lma_t
+    
+def read_referenced_biteplate(my_dir,file_name,sensors,subcolumns):
     ''' 
     Input 
         mydir- directory where biteplate file will be found 
@@ -116,8 +162,29 @@ def read_biteplate(my_dir,file_name,sensors,subcolumns):
     [OS,m] = get_rotation(bpdata)
     return OS, m
 
-def rotate_data(df,m,origin, sensors):
+
+def read_3pt_biteplate(my_dir,file_name,sensors,subcolumns):
     ''' 
+    Input 
+        mydir- directory where biteplate file will be found 
+        file_name - name of a biteplate calibration recording
+        sensors - a list of sensors in the recording
+        subcolumns - a list of info to be found for each sensor
+
+    Output  
+        desired positions of the head location sensors: REF, RMA, and LMA
+            (nasion, right mastoid, left mastoid)
+    '''
+
+    bpdata = read_ndi_data(my_dir,file_name,sensors,subcolumns)
+    [REF, RMA, LMA] = get_desired_head_location(bpdata)
+    return REF, RMA, LMA
+
+def rotate_referenced_data(df,m,origin, sensors):
+    ''' 
+    This function can be used when NDI head correction is used.  All we need is a translation vector
+    and a rotation matrix, to move the data into the occlusal coordinate system.
+    
     Input
         df - a pandas dataframe read by read_ndi_data
         m  - a rotation matrix computed by read_biteplate
@@ -125,7 +192,7 @@ def rotate_data(df,m,origin, sensors):
             specifically we exect to find columns with these names plus "_x", "_y" and "_z"
             
     Output
-        df - the dataframe with the xyz locations of the sensors rotated
+        df - the dataframe with the xyz locations of the sensors translatedd and rotated
     '''
 
     # TODO:  remove quaternion data, or fix it.
@@ -142,7 +209,25 @@ def rotate_data(df,m,origin, sensors):
 
     return df
 
-
+def head_correct_and_rotate(df,REF,RMA,LMA):
+    '''This function uses the previously calculated desired locations of three sensors 
+    on the head -- nasion (REF), right mastoid (RMA), and left mastoid (LMA) and based 
+    on the locations of those sensors in each frame, finds a translation and rotation 
+    for the frame's data, and then applies those to each sensor in that frame.
+    '''
+    
+    # for each frame
+    # 1) find the translation and rotation that will move the head into the occlusal coordinate system
+    #              this is where we use Horns direct method of fitting to an ideal triangle
+    # 2) apply the translation and rotation to each sensor in the frame.
+    
+    ''' Question:  should we smooth the head position sensors prior to head correction?
+        A reason to do this is that we can then avoid loosing any data due to calibration sensor dropout
+        (assuming that missing frames are rare and can be interpolated).  Smoothing might also produce more 
+        accurate data because we constrain our estimate of the the location of the head (a very slow moving 
+        structure) by neighboring points in time.
+    '''
+    
 def save_rotated(mydir,fname,df,myext = 'ndi'):
     '''
     save the rotated data as *.ndi
